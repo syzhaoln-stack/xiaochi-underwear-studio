@@ -1,0 +1,9 @@
+{
+  "name": "xiaochi-underwear-studio",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite --host 127.0.0.1 --port 5183", "test": "node --test pattern.test.mjs", "build": "vite build --base=./", "preview": "vite preview --host 127.0.0.1 --port 5184" },
+  "dependencies": { "three": "0.183.2", "clipper-lib": "6.4.2" },
+  "devDependencies": { "vite": "7.1.12" }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.playwright-cli/
+*.log
+.env
+.env.*
+*.blend1
+*.zip
+qa-*
+studio-*.png

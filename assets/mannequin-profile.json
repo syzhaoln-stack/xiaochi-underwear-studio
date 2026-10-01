@@ -1,0 +1,63 @@
+{
+  "units": "m",
+  "axis": "Y up; front +Z",
+  "torso_profile_y_rx_rz_zCenter": [
+    [
+      0,
+      0.11,
+      0.084,
+      0
+    ],
+    [
+      0.025,
+      0.149,
+      0.112,
+      0
+    ],
+    [
+      0.06,
+      0.176,
+      0.132,
+      0
+    ],
+    [
+      0.12,
+      0.19,
+      0.14,
+      0
+    ],
+    [
+      0.2,
+      0.182,
+      0.127,
+      0
+    ],
+    [
+      0.27,
+      0.169,
+      0.115,
+      0
+    ],
+    [
+      0.35,
+      0.158,
+      0.106,
+      0
+    ],
+    [
+      0.45,
+      0.156,
+      0.105,
+      0
+    ]
+  ],
+  "waist_y": 0.35,
+  "hip_y": 0.12,
+  "crotch_y_approx": 0,
+  "upper_cut_y": 0.45,
+  "leg_bottom_y": -0.35,
+  "hip_circumference_approx_cm": 104,
+  "waist_circumference_approx_cm": 84,
+  "source": "Blender 4.5.13, blender/build_assets.py",
+  "note": "Illustrative smooth mannequin; dimensions approximate after surface smoothing."
+}
