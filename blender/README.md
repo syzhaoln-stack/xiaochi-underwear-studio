@@ -28,6 +28,8 @@ GLB 使用米、Y 向上、+Z 朝前；Blender 源场景使用 Z 向上、-Y 朝
 
 ## 重建
 
+从应用根目录运行，需要 Blender 和可在命令行访问的 Node.js 22 或更新版本。脚本读取 `pattern.js` 的真实净样轮廓生成四片平铺，默认左右 C 拼缝各前移 3 cm；该值仅为场景演示。
+
 ```powershell
 blender --background --python '.\blender\build_assets.py'
 ```
