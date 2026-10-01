@@ -6,7 +6,7 @@
 export const DEFAULTS = Object.freeze({
   waist: 84, hip: 104, reductionPct: 4, rise: 'mid',
   frontLength: 18, backLength: 21, gussetLength: 17,
-  gussetFront: 7, gussetBack: 9, sideSeam: 9,
+  gussetFront: 7, gussetBack: 9, sideSeam: 9, seamShift: 3,
   seamAllowance: 0.6, edgeAllowance: 0,
   waistElasticPct: 95, legElasticPct: 95, overlap: 1.2,
   legElasticMode: 'uniform', frontElasticPct: 100, gussetElasticPct: 100, backElasticPct: 95,
@@ -143,6 +143,105 @@ function makeGusset(id, p, joinHandles) {
     { length: p.gussetLength, frontWidth: p.gussetFront, backWidth: p.gussetBack });
 }
 
+/** Move an unchanged front wing across the old side seam onto the back.
+ * All working contours are the existing sampled stitch polygons. Splitting
+ * an existing segment preserves total opening lengths and net area exactly.
+ * The wing is placed by a distance-preserving reflected isometry, not scaled.
+ */
+function transferFrontWings(front, back, p) {
+  const amount = p.seamShift;
+  const oldFrontSide = front.seams.sideRight.points;
+  const oldBackSide = back.seams.sideRight.points;
+  const oldFrontLeg = front.seams.legRight.points;
+  const oldBackLeg = back.seams.legRight.points;
+  const originalFrontWaist = front.seams.waist.length;
+  const originalBackWaist = back.seams.waist.length;
+  const sourceLegLength = front.seams.legRight.length;
+  const metadata = { amount, referenceSideSeam: p.sideSeam, sideSeamLength: p.sideSeam,
+    frontLegT: 0, frontLegFraction: 0, frontWaistFraction: 0, transferredLegArc: 0,
+    originalFrontWaistWidth: originalFrontWaist, originalBackWaistWidth: originalBackWaist,
+    front: { originalRight: oldFrontSide, shiftedRight: oldFrontSide, wingRight: [] },
+    back: { originalRight: oldBackSide, shiftedRight: oldBackSide, wingRight: [] } };
+  const reference = piece => ({ sideRight: { points: piece.seams.sideRight.points, length: p.sideSeam, label: '原侧线参考' },
+    sideLeft: { points: piece.seams.sideLeft.points, length: p.sideSeam, label: '原侧线参考' } });
+  if (amount === 0) {
+    front.references = reference(front); back.references = reference(back);
+    return { front, back, metadata };
+  }
+  if (originalFrontWaist - 2 * amount <= p.gussetFront + 1) {
+    throw new Error('前移量过大：前片剩余腰口须比裆前端至少宽 1 cm，请减小前移量。');
+  }
+  const newTop = [oldFrontSide[0][0] - amount, oldFrontSide[0][1]];
+  const v = subtract(oldFrontSide[1], oldFrontSide[0]);
+  let split = null;
+  for (let i = 0; i < oldFrontLeg.length - 1; i++) {
+    const a = oldFrontLeg[i], edge = subtract(oldFrontLeg[i+1], a);
+    const denominator = cross(v, edge);
+    if (Math.abs(denominator) < EPS) continue;
+    const relative = subtract(a, newTop);
+    const alongSide = cross(relative, edge) / denominator;
+    const alongEdge = cross(relative, v) / denominator;
+    if (alongSide > 0 && alongEdge >= -EPS && alongEdge <= 1 + EPS) {
+      const fraction = Math.max(0, Math.min(1, alongEdge));
+      split = { index: i, fraction, point: [a[0]+fraction*edge[0], a[1]+fraction*edge[1]], t: (i+fraction)/N };
+      break;
+    }
+  }
+  if (!split || split.t >= .85) throw new Error('前移线无法在合适的前片腿弯处相交，请减小前移量。');
+  const deduplicate = pts => pts.filter((pt,i) => i===0 || distance(pt,pts[i-1]) > EPS);
+  const transferredLeg = deduplicate([...oldFrontLeg.slice(0,split.index+1), split.point]);
+  const retainedLeg = deduplicate([split.point, ...oldFrontLeg.slice(split.index+1)]);
+  const sideLength = distance(newTop,split.point);
+  if (sideLength < 2 || retainedLeg.length < 2) throw new Error('前移后拼缝或腿弯过短，请调整前移量。');
+  const sourceTangent = v.map(value => value/p.sideSeam);
+  const targetTangent = subtract(oldBackSide[1],oldBackSide[0]).map(value => value/p.sideSeam);
+  const sourceNormal = [sourceTangent[1],-sourceTangent[0]];
+  const targetNormal = [targetTangent[1],-targetTangent[0]];
+  const placeOnBack = point => {
+    const q = subtract(point,oldFrontSide[0]);
+    const along = q[0]*sourceTangent[0]+q[1]*sourceTangent[1];
+    const across = q[0]*sourceNormal[0]+q[1]*sourceNormal[1];
+    return oldBackSide[0].map((value,axis) => value+along*targetTangent[axis]-across*targetNormal[axis]);
+  };
+  const backTop = placeOnBack(newTop), backSplit = placeOnBack(split.point);
+  const rearLeg = deduplicate([...transferredLeg.slice().reverse().map(placeOnBack), ...oldBackLeg.slice(1)]);
+  const frontWaist = [[-newTop[0],newTop[1]],newTop];
+  const backWaist = [mirrored([backTop])[0],back.seams.waist.points[0],back.seams.waist.points.at(-1),backTop];
+  const build = (source,waist,sideRight,legRight,waistLength) => {
+    const pts=[waist[0]],roles=[];
+    const add=(point,role)=>{roles.push(role);pts.push(point);};
+    waist.slice(1).forEach(point=>add(point,'waist'));
+    add(sideRight[1],'side');
+    legRight.slice(1).forEach(point=>add(point,'leg'));
+    add(source.seams.gussetJoin.points[1],'join');
+    mirrored(legRight).reverse().slice(1).forEach(point=>add(point,'leg'));
+    roles.push('side');
+    const seam=(points,label)=>({points,length:lineLength(points),...(label?{label}:{})});
+    const seams={...source.seams,waist:seam(waist),sideRight:seam(sideRight,'C'),sideLeft:seam(mirrored(sideRight),'C'),
+      legRight:seam(legRight),legLeft:seam(mirrored(legRight))};
+    // Retain the source terminal cubic and its parameter domain for A/B tangent
+    // checks. The complete redivided edge is explicitly a sampled composite.
+    for(const side of ['legRight','legLeft']) seams[side].curve={...source.seams[side].curve,
+      sourceOnly:true,parameterRange:source.id==='front'?[split.t,1]:[0,1]};
+    const piece=finishPiece(source.id,source.name,pts,roles,seams,p,{...source.annotations,
+      waistWidth:waistLength,originalWaistWidth:source.annotations.waistWidth,
+      originalHipWidth:source.annotations.hipWidth,referenceSideSeam:p.sideSeam,sideSeam:sideLength,
+      seamShift:amount,legEdgeType:source.id==='front'?'retained-source-curve':'transferred-wing-and-source-curve'});
+    piece.references=reference(source);
+    return piece;
+  };
+  const newFront=build(front,frontWaist,[newTop,split.point],retainedLeg,originalFrontWaist-2*amount);
+  const newBack=build(back,backWaist,[backTop,backSplit],rearLeg,originalBackWaist+2*amount);
+  const wingFront=deduplicate([newTop,oldFrontSide[0],...transferredLeg]);
+  newBack.transferredWings={right:wingFront.map(placeOnBack),left:mirrored(wingFront.map(placeOnBack))};
+  Object.assign(metadata,{sideSeamLength:sideLength,frontLegT:split.t,
+    frontLegFraction:lineLength(transferredLeg)/sourceLegLength,frontWaistFraction:amount/(originalFrontWaist/2),
+    transferredLegArc:lineLength(transferredLeg),
+    front:{originalRight:oldFrontSide,shiftedRight:[newTop,split.point],wingRight:wingFront},
+    back:{originalRight:oldBackSide,shiftedRight:[backTop,backSplit],wingRight:wingFront.map(placeOnBack)}});
+  return {front:newFront,back:newBack,metadata};
+}
+
 /** @returns {{valid:boolean,errors:string[],warnings:string[],params:object,pieces:object[],dimensions:object}} */
 export function draft(input = {}) {
   const p = { ...DEFAULTS, ...input }, errors = [], warnings = [];
@@ -151,7 +250,7 @@ export function draft(input = {}) {
     waist: [45, 180, '腰围'], hip: [60, 200, '臀围'], reductionPct: [0, 15, '纸样收紧比例'],
     frontLength: [10, 42, '前片中线长'], backLength: [12, 46, '后片中线长'],
     gussetLength: [8, 28, '裆片长'], gussetFront: [3, 14, '裆片前端宽'], gussetBack: [3, 18, '裆片后端宽'],
-    sideSeam: [3, 26, '侧缝长'], seamAllowance: [0, 2.5, '接缝缝份'], edgeAllowance: [0, 2.5, '腰腿边预留'],
+    sideSeam: [3, 26, '原侧线参考长'], seamShift: [0, 6, '左右拼缝前移量'], seamAllowance: [0, 2.5, '接缝缝份'], edgeAllowance: [0, 2.5, '腰腿边预留'],
     waistElasticPct: [50, 115, '腰带比例'], overlap: [0, 5, '接头额外用量'],
     ...(segmented ? {
       frontElasticPct: [50, 100, '前段腿带比例'], gussetElasticPct: [50, 100, '裆段腿带比例'], backElasticPct: [50, 100, '后段腿带比例'],
@@ -191,8 +290,8 @@ export function draft(input = {}) {
     ['后片', backWaistWidth, backHipWidth, p.backLength, p.gussetBack],
   ]) {
     const dx = (h - w) / 2;
-    if (p.sideSeam <= dx + 0.05) errors.push(`${name}侧缝过短，无法连接此腰臀差；请增加侧缝长或调整围度。`);
-    else if (length <= Math.sqrt(p.sideSeam ** 2 - dx ** 2) + 2) errors.push(`${name}中线长需至少比侧缝垂直落差多 2 cm，才能形成腿弯。`);
+    if (p.sideSeam <= dx + 0.05) errors.push(`${name}原侧线参考长过短，无法连接此腰臀差；请增加原侧线参考长或调整围度。`);
+    else if (length <= Math.sqrt(p.sideSeam ** 2 - dx ** 2) + 2) errors.push(`${name}中线长需至少比原侧线参考的垂直落差多 2 cm，才能形成腿弯。`);
     if (join >= h * 0.65) errors.push(`${name}裆端宽过大，需小于本片臀横宽的 65%。`);
   }
   if (errors.length) return result;
@@ -210,11 +309,13 @@ export function draft(input = {}) {
     const y = Math.min((length - sideDrop) * 0.48, nominalHandleY);
     joinHandles[id] = { x: (joinWidth/2-inset) * y/nominalHandleY, y };
   }
-  let pieces;
+  let pieces, seamShift;
   try {
     pieces = [makeBody('front', frontWaistWidth, frontHipWidth, p.frontLength, p.gussetFront, p, joinHandles.front),
       makeBody('back', backWaistWidth, backHipWidth, p.backLength, p.gussetBack, p, joinHandles.back),
       makeGusset('gusset-outer', p, joinHandles), makeGusset('gusset-lining', p, joinHandles)];
+    const moved=transferFrontWings(pieces[0],pieces[1],p);
+    pieces[0]=moved.front; pieces[1]=moved.back; seamShift=moved.metadata;
   } catch (error) { errors.push(error.message); return result; }
   const frontLegArc = pieces[0].seams.legRight.length, backLegArc = pieces[1].seams.legRight.length;
   const gussetSideArc = pieces[2].seams.legRight.length;
@@ -227,7 +328,7 @@ export function draft(input = {}) {
   const legSegments = hasUniformOpeningOverride ? [] : [
     { id: 'front', name: '前片腿弯', patternLength: frontLegArc, override: p.frontLegOverride, ratio: p.frontElasticPct },
     { id: 'gusset', name: '裆侧边', patternLength: gussetSideArc, override: p.gussetLegOverride, ratio: p.gussetElasticPct },
-    { id: 'back', name: '后片腿弯', patternLength: backLegArc, override: p.backLegOverride, ratio: p.backElasticPct },
+    { id: 'back', name: p.seamShift>0?'后片及前移翼腿弯':'后片腿弯', patternLength: backLegArc, override: p.backLegOverride, ratio: p.backElasticPct },
   ].map(segment => {
     const basisLength = measuredSegments ? segment.override : segment.patternLength;
     const ratioPct = segmented ? segment.ratio : p.legElasticPct;
@@ -243,6 +344,8 @@ export function draft(input = {}) {
   warnings.push('参数化试裁模板：未经真人试穿或特定面料验证，先用同类面料做样片。');
   warnings.push('围度收紧比例与松紧带比例分别调整；它们都不等于面料拉伸率。');
   warnings.push('中腰的输入腰围应取实际腰口位置；高腰应取目标高腰线围度。');
+  if(p.seamShift>0) warnings.push(`左右 C 拼缝各由原正侧参考线沿腰口向前移 ${fmt(p.seamShift)} cm；3 cm 是可修改演示值，不是“一指半”的固定换算。原前片窄翼已无缩放转移给后片。`);
+  if(p.seamShift>0 && segmented) warnings.push('分区按当前布片划分：后片段包含转移来的前侧髋窄翼，不等同人体后臀。若前翼需保持较松，应另作定位并试样调整。');
   warnings.push('默认采用对折松紧带包边（FOE）：腰腿边不另加预留，接缝缝份 0.6 cm；其他工艺需重新设置。');
   warnings.push('接头额外用量按每根计一次；默认对缝两端各 0.6 cm，共 1.2 cm，其他连接方式按实际工艺调整。');
   if (p.waistOpeningOverride !== null || hasUniformOpeningOverride) warnings.push('实测开口只用于松紧带裁长，纸样几何仍由围度与版型参数生成。');
@@ -255,7 +358,11 @@ export function draft(input = {}) {
   const dimensions = { waistOpening, hipFinished, legOpening, waistElastic, legElastic, legElasticNet, legSegments,
     legElasticMode: p.legElasticMode, legElasticBasisSource: measuredSegments ? 'segments-measured' : hasUniformOpeningOverride ? 'opening-measured' : 'pattern',
     waistElasticTotal: waistElastic, legElasticTotal: legElastic * 2, allElasticTotal: waistElastic + legElastic * 2,
-    waistElasticBasis, legElasticBasis, frontWaistWidth, backWaistWidth, frontHipWidth, backHipWidth,
+    waistElasticBasis, legElasticBasis, frontWaistWidth:pieces[0].seams.waist.length, backWaistWidth:pieces[1].seams.waist.length,
+    frontHipWidth, backHipWidth, originalFrontHipWidth:frontHipWidth,originalBackHipWidth:backHipWidth,
+    originalFrontWaistWidth:frontWaistWidth,originalBackWaistWidth:backWaistWidth,
+    frontNetSpan:pieces[0].seamBounds.width,backNetSpan:pieces[1].seamBounds.width,
+    seamShift:p.seamShift, sideSeamLength:seamShift.sideSeamLength,referenceSideSeam:p.sideSeam,transferredLegArc:seamShift.transferredLegArc,
     frontLength: p.frontLength, backLength: p.backLength, sideSeam: p.sideSeam,
     gussetLength: p.gussetLength, gussetFront: p.gussetFront, gussetBack: p.gussetBack,
     frontLegArc, backLegArc, gussetSideArc, allowance: p.seamAllowance, edgeAllowance: p.edgeAllowance,
@@ -263,7 +370,7 @@ export function draft(input = {}) {
     crotchPathLength: p.frontLength + p.gussetLength + p.backLength,
     seamMatches: { sideLeft: true, sideRight: true, gussetFront: true, gussetBack: true },
   };
-  return { ...result, valid: true, pieces, dimensions };
+  return { ...result, valid: true, pieces, dimensions, seamShift };
 }
 
 const polyPath = (pts) => `M${pts.map(([x, y]) => `${round(x)},${round(y)}`).join('L')}Z`;
@@ -288,7 +395,7 @@ export function renderPatternSVG(model, options = {}) {
     { x: infoX + 14, y: infoY + 7.8, value: `每根接头额外用量 ${fmt(p.overlap)} cm`, size: 1.03 },
     { x: infoX, y: infoY + 15, value: `接缝缝份 ${fmt(p.seamAllowance)} cm · 腰腿边预留 ${fmt(p.edgeAllowance)} cm`, size: 1.06 },
     { x: infoX, y: infoY + 17.2, value: '实线＝裁剪线；虚线＝净样缝线', size: 1.06 },
-    { x: infoX, y: infoY + 19.4, value: 'A 接前裆 / B 接后裆 / C 接左右侧缝', size: 1.06 },
+    { x: infoX, y: infoY + 19.4, value: 'A 接前裆 / B 接后裆 / C 接左右前移拼缝', size: 1.06 },
   ];
   const finishLabels = { foe: '对折包边松紧带（FOE）', turned: '内折松紧带' };
   const joinLabels = { sewn: '对缝', overlap: '搭接', custom: '自定义接头' };
@@ -300,11 +407,14 @@ export function renderPatternSVG(model, options = {}) {
     `收口：${finish}；接头：${join}；每根接头额外用量 ${fmt(p.overlap)} cm。腿带：${modeLabel}，净圈 ${fmt(d.legElasticNet)} cm，裁长 ${fmt(d.legElastic)} cm × 2。`,
     segments.length ? `每条分段净带长：${segments.map(segment => `${segment.name} ${fmt(segment.basisLength)} × ${fmt(segment.ratioPct)}% = ${fmt(segment.elasticLength)} cm`).join('；')}。`
       : `当前采用实测腿口总长 ${fmt(d.legElasticBasis)} cm × ${fmt(p.legElasticPct)}%；整圈模式不据总长推算 A/B 定位。`,
-    segments.length ? `先接好带，再沿净圈定位：侧缝 0 → 前片 → A ${fmt(segments[0].endMark)} → 裆侧 → B ${fmt(segments[1].endMark)} → 后片 → 侧缝 ${fmt(d.legElasticNet)} cm。定位不含接头。`
+    segments.length ? `先接好带，再沿净圈定位：C 拼缝 0 → 前片 → A ${fmt(segments[0].endMark)} → 裆侧 → B ${fmt(segments[1].endMark)} → 后片${p.seamShift>0?'及前移翼':''} → C 拼缝 ${fmt(d.legElasticNet)} cm。定位不含接头。`
       : '如需前松后紧，请在已合侧缝、尚未装松紧时，分别测前腿弯、裆侧边、后腿弯；布边保持不拉伸。',
     p.legElasticMode === 'segmented' ? '前 100%／裆 100%／后 95% 仅演示分区计算，不是推荐比例；各段张力须按实际弹力带试绕、试穿调整。'
       : '整圈均匀比例只作试样起点；如需分区张力，可在网页切换前／裆／后分区模式并逐段调整。',
   ];
+  bottomValues.push(`左右 C 拼缝各从正侧参考沿腰边向前移 ${fmt(p.seamShift)} cm；C 净长 ${fmt(d.sideSeamLength)} cm，原侧线参考 ${fmt(p.sideSeam)} cm。灰点线仅定位，不裁开、不加缝份。`);
+  if(p.seamShift>0) bottomValues.push('前片窄翼无缩放转入后片，腰口与整圈腿口保持不变；后片腰口沿实际折线量净边长，前移数值须按本人髋骨位置试穿校正。');
+  if(p.seamShift>0 && p.legElasticMode==='segmented') bottomValues.push('分区按当前布片划分：后片段包括前侧髋窄翼，不等同人体后臀；前后比例不同，移缝后分区总带长会相应改变。');
   if (d.legElasticBasisSource === 'segments-measured' || d.legElasticBasisSource === 'opening-measured') {
     bottomValues.push(`腿带带长采用${d.legElasticBasisSource === 'segments-measured' ? '三段实测' : '整圈实测'}；实测未改变本图纸样。请核对实测样裤与本图纸样是否一致，勿将带长视为已重制纸样的配套值。`);
   }
@@ -328,6 +438,9 @@ export function renderPatternSVG(model, options = {}) {
     const tx = x - piece.bounds.minX, ty = y - piece.bounds.minY, a = piece.annotations;
     const color = PIECE_COLORS[piece.id];
     let content = `<path class="cut" fill="${color}" stroke="${color}" d="${polyPath(showAllowance ? piece.points : piece.seamPoints)}"/>`;
+    if(piece.transferredWings) for(const wing of Object.values(piece.transferredWings)) {
+      content += `<path data-transferred-wing="true" d="${polyPath(wing)}" fill="#b47f9c" fill-opacity=".12" stroke="none"/>`;
+    }
     if (showAllowance) content += `<path class="seam" d="${polyPath(piece.seamPoints)}"/>`;
     if (showGrain) {
       const y1 = 2.8, y2 = a.length - 2.8;
@@ -342,13 +455,19 @@ export function renderPatternSVG(model, options = {}) {
     content += text(0,piece.bounds.maxY+8.8,'横向最大弹力',1.03,'text-anchor="middle"');
     if (piece.id === 'front' || piece.id === 'back') {
       content += text(0,a.length-1.2,`${piece.seams.gussetJoin.label} · 接裆片`,1.03,'text-anchor="middle"');
-      content += text(-a.hipWidth/2+1.7,a.sideDrop/2,'C',1.2) + text(a.hipWidth/2-1.7,a.sideDrop/2,'C',1.2,'text-anchor="end"');
+      for(const side of ['sideRight','sideLeft']) {
+        const actual=piece.seams[side].points,original=piece.references[side].points;
+        content += line(...original[0],...original[1],'class="reference-side" data-reference="original-side"');
+        content += line(...actual[0],...actual[1],'class="shifted-side" data-seam="C"');
+        const sign=side==='sideRight'?1:-1;
+        content += text((actual[0][0]+actual[1][0])/2-sign*1.3,(actual[0][1]+actual[1][1])/2,'C',1.2,'text-anchor="middle"');
+      }
       if (showDimensions) {
-        content += horizontalDim(-a.waistWidth/2,a.waistWidth/2,-2.8,`腰口净宽 ${fmt(a.waistWidth)} cm`);
-        content += horizontalDim(-a.hipWidth/2,a.hipWidth/2,a.sideDrop+1.7,`臀横净宽 ${fmt(a.hipWidth)} cm`);
+        content += text(0,piece.bounds.minY-2.8,`腰口净边长 ${fmt(piece.seams.waist.length)} cm${piece.id==='back'&&p.seamShift>0?'（沿折线）':''}`,1.08,'text-anchor="middle" data-label="waist-edge-length"');
         content += horizontalDim(-a.joinWidth/2,a.joinWidth/2,a.length+1.35,`${fmt(a.joinWidth)} cm`);
         content += verticalDim(piece.bounds.maxX+2.4,0,a.length,`${fmt(a.length)} cm`);
-        content += text(piece.bounds.minX+1.1,a.sideDrop/2+1.8,`侧缝 ${fmt(p.sideSeam)} cm`,1.02,'data-label="side-length"');
+        content += text(0,2,`C 拼缝 ${fmt(d.sideSeamLength)} cm`,1.05,'text-anchor="middle" data-label="side-length"');
+        content += text(0,3.6,`原侧线参考 ${fmt(p.sideSeam)} cm`,.96,'text-anchor="middle"');
       }
     } else {
       content += text(0,1.7,'A · 接前片',1.03,'text-anchor="middle"');
@@ -367,7 +486,7 @@ export function renderPatternSVG(model, options = {}) {
 <title>女士三角内裤 · ${p.rise==='high'?'高腰':'中腰'} · 参数化试裁纸样</title>
 <desc>单位厘米；整片输出，无需对折裁剪。以百分之百实际尺寸打印，量取校准框确认比例。未经真人试穿验证。</desc>
 <defs><marker id="dimArrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M10 1L0 5L10 9" fill="none" stroke="#64716c" stroke-width="1.3"/></marker><marker id="grainArrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse"><path d="M10 1L0 5L10 9" fill="none" stroke="#778379" stroke-width="1.3"/></marker></defs>
-<style>text{font-family:"Noto Sans SC","Microsoft YaHei",sans-serif;fill:#293f3a}.cut{fill-opacity:.13;stroke-width:.105;stroke-linejoin:round}.seam{fill:none;stroke:#65545d;stroke-width:.065;stroke-dasharray:.48 .32}.dimension{stroke:#64716c;stroke-width:.045}.dimension text{stroke:none;fill:#56675f}.grain{stroke:#778379;stroke-width:.055}.centre{stroke:#a5aaa0;stroke-width:.035;stroke-dasharray:.15 .35}.piece-title{font-weight:600}</style>
+<style>text{font-family:"Noto Sans SC","Microsoft YaHei",sans-serif;fill:#293f3a}.cut{fill-opacity:.13;stroke-width:.105;stroke-linejoin:round}.seam{fill:none;stroke:#65545d;stroke-width:.065;stroke-dasharray:.48 .32}.reference-side{stroke:#7a8082;stroke-width:.07;stroke-dasharray:.15 .28}.shifted-side{stroke:#733d66;stroke-width:.13}.dimension{stroke:#64716c;stroke-width:.045}.dimension text{stroke:none;fill:#56675f}.grain{stroke:#778379;stroke-width:.055}.centre{stroke:#a5aaa0;stroke-width:.035;stroke-dasharray:.15 .35}.piece-title{font-weight:600}</style>
 <rect width="100%" height="100%" fill="#fffef9"/>
 ${text(margin,3.8,'女士三角内裤 · 参数化试裁纸样',2.1,'font-weight="600"')}
 ${text(margin,6.2,`${p.rise==='high'?'高腰':'中腰'} | 腰口位置围度 ${fmt(p.waist)} cm · 臀围 ${fmt(p.hip)} cm · 试样收紧 ${fmt(p.reductionPct)}%`,1.17)}

@@ -72,6 +72,17 @@ function line(points, color, dashed = false) {
   return object;
 }
 
+function seamBadge() {
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fffdfd'; ctx.beginPath(); ctx.arc(64, 64, 57, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#58405d'; ctx.lineWidth = 5; ctx.stroke();
+  ctx.font = '600 78px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#58405d'; ctx.fillText('C', 64, 69);
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false, depthTest: false, toneMapped: false }));
+  sprite.scale.set(.028, .028, 1); sprite.renderOrder = 8; return sprite;
+}
+
 export class GarmentViewer {
   constructor(container, { onStatus = () => {} } = {}) {
     if (!container) throw new Error('三维展示容器不存在。');
@@ -179,6 +190,7 @@ export class GarmentViewer {
       this.sideBottom = clamp(this.sideTop - p.sideSeam / 100, .085, this.sideTop - .025);
       this.crotchFrontY = clamp(.014 + (p.gussetLength - 17) * .002, .004, .048);
       this.crotchBackY = this.crotchFrontY;
+      this.updateSeamAngles();
       this.updateBody(); this.buildWear(); this.buildFlat(); this.applyVisibility(); this.selectPiece(this.selected);
     } catch (error) {
       this.onStatus(`三维参数更新失败：${error.message}`);
@@ -206,8 +218,10 @@ export class GarmentViewer {
     }
   }
 
-  pointOnPanel(id, u, v) {
-    const back = id === 'back', theta = (u - .5) * Math.PI, s = Math.abs(Math.sin(theta));
+  originalSurface(theta, v) {
+    // The pre-transfer 360-degree garment stays unchanged. Only ownership of
+    // its front-side strips changes, so moving C cannot open a hole or shrink the waist.
+    const back = Math.cos(theta) < -1e-10, s = Math.abs(Math.sin(theta));
     const seamWidth = (back ? this.params.gussetBack : this.params.gussetFront) / 100;
     const crotchY = back ? this.crotchBackY : this.crotchFrontY;
     const r0 = profile(crotchY)[0] * this.radialScale(crotchY) + .006;
@@ -217,7 +231,41 @@ export class GarmentViewer {
     const top = lerp(back ? this.backTop : this.frontTop, this.sideTop, s * s);
     const y = lerp(bottom, top, v);
     const [rx, rz] = profile(y), scale = this.radialScale(y);
-    return [(rx * scale + .006) * Math.sin(theta), y, (back ? -1 : 1) * (rz * scale + .006) * Math.cos(theta)];
+    return [(rx * scale + .006) * Math.sin(theta), y, (rz * scale + .006) * Math.cos(theta)];
+  }
+
+  angleAtTransferredFraction(v, fraction, start = 0) {
+    const count = 192, samples = [{ theta: start, distance: 0 }];
+    let previous = V(...this.originalSurface(start, v)), distance = 0;
+    for (let i = 1; i <= count; i++) {
+      const theta = lerp(start, Math.PI / 2, i / count), point = V(...this.originalSurface(theta, v));
+      distance += point.distanceTo(previous); samples.push({ theta, distance }); previous = point;
+    }
+    const target = distance * (1 - clamp(fraction, 0, .94));
+    const index = samples.findIndex(s => s.distance >= target);
+    if (index <= 0) return start;
+    const a = samples[index - 1], b = samples[index];
+    return lerp(a.theta, b.theta, (target - a.distance) / Math.max(1e-9, b.distance - a.distance));
+  }
+
+  updateSeamAngles() {
+    const mapping = this.model.seamShift;
+    this.seamShift = Math.max(0, Number(mapping?.amount ?? this.params.seamShift ?? 3));
+    const reduction = 1 - this.params.reductionPct / 100;
+    const frontWaistHalf = this.params.waist * reduction * .48 / 2;
+    const frontLegWidth = this.params.hip * reduction * .48 / 2 - this.params.gussetFront / 2;
+    const waistFraction = mapping?.frontWaistFraction ?? this.seamShift / Math.max(1, frontWaistHalf);
+    const legFraction = mapping?.frontLegFraction ?? this.seamShift / Math.max(1, frontLegWidth);
+    const r0 = profile(this.crotchFrontY)[0] * this.radialScale(this.crotchFrontY) + .006;
+    const start = Math.asin(clamp(this.params.gussetFront / 200 / r0, .07, .66));
+    this.seamTopAngle = this.angleAtTransferredFraction(1, waistFraction);
+    this.seamBottomAngle = this.angleAtTransferredFraction(0, legFraction, start);
+  }
+
+  pointOnPanel(id, u, v) {
+    const seamAngle = lerp(this.seamBottomAngle ?? Math.PI / 2, this.seamTopAngle ?? Math.PI / 2, v);
+    const theta = id === 'front' ? (2 * u - 1) * seamAngle : Math.PI - (2 * u - 1) * (Math.PI - seamAngle);
+    return this.originalSurface(theta, v);
   }
 
   gussetPoint(u, v, lining = false) {
@@ -257,6 +305,27 @@ export class GarmentViewer {
       for (let i = 39; i >= 0; i--) boundary.push(point(0, i / 40));
       const seam = line(boundary, new THREE.Color(COLORS[id]).multiplyScalar(.55));
       seam.userData.pieceId = id; group.add(seam);
+      if (isBody) {
+        for (const side of [0, 1]) {
+          const points = Array.from({ length: 65 }, (_, i) => V(...point(side, i / 64)));
+          const seamCurve = new THREE.CatmullRomCurve3(points);
+          const visibleSeam = new THREE.Mesh(new THREE.TubeGeometry(seamCurve, 64, .00115, 5, false), new THREE.MeshStandardMaterial({ color: '#523952', roughness: 1 }));
+          visibleSeam.userData.pieceId = id; visibleSeam.userData.explodeOnly = id === 'back'; group.add(visibleSeam);
+          const badge = seamBadge(), location = V(...point(side, .58));
+          location.x *= 1.035; location.z *= 1.035; badge.position.copy(location);
+          badge.userData.explodeOnly = id === 'back'; group.add(badge);
+        }
+        if (id === 'back' && this.seamShift > .001) {
+          for (const sign of [-1, 1]) {
+            const points = Array.from({ length: 65 }, (_, i) => {
+              const p = this.originalSurface(sign * Math.PI / 2, i / 64); p[0] += sign * .0016; return p;
+            });
+            const reference = line(points, '#ffffff', true); reference.material.opacity = .95;
+            reference.material.dashSize = .006; reference.material.gapSize = .005;
+            reference.userData.pieceId = id; group.add(reference);
+          }
+        }
+      }
       this.wearGroup.add(group); this.pieceGroups[id] = group;
       if (isBody) {
         for (const edge of [0, 1]) {
@@ -310,6 +379,23 @@ export class GarmentViewer {
       const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape), this.material(piece.id)); mesh.userData.pieceId = piece.id; group.add(mesh);
       this.pieceMeshes.push(mesh);
       const outline = line([...points, points[0]].map(([x, y]) => [x, y, .0005]), new THREE.Color(COLORS[piece.id]).multiplyScalar(.55)); outline.userData.pieceId = piece.id; group.add(outline);
+      if (piece.id === 'front' || piece.id === 'back') {
+        const local = ([x, y], depth = .0018) => [(x - midX) / 100, -(y - midY) / 100, depth];
+        for (const name of ['sideLeft', 'sideRight']) {
+          const edge = piece.seams[name]?.points;
+          if (!edge) continue;
+          group.add(line(edge.map(p => local(p)), '#523952'));
+          const middle = edge[0].map((value, axis) => (value + edge.at(-1)[axis]) / 2), badge = seamBadge();
+          badge.position.set(...local(middle, .003)); badge.scale.multiplyScalar(.7); group.add(badge);
+        }
+        const reference = this.model.seamShift?.back?.originalRight;
+        if (piece.id === 'back' && this.seamShift > .001 && reference?.length) {
+          for (const sign of [-1, 1]) {
+            const guide = line(reference.map(([x, y]) => local([x * sign, y])), '#ffffff', true);
+            guide.material.opacity = .95; group.add(guide);
+          }
+        }
+      }
       group.add(line([[0, -b.height / 200 + .01, .001], [0, b.height / 200 - .01, .001]], '#ffffff', true));
       const sprite = label(NAMES[piece.id]); sprite.position.set(0, -b.height / 200 - .044, .01); group.add(sprite);
       const row = index < 2 ? 0 : 1;
@@ -346,6 +432,7 @@ export class GarmentViewer {
     for (const [id, group] of Object.entries(this.pieceGroups)) {
       group.userData.target = exploded ? shifts[id] : V(0, 0, 0);
       group.rotation.x = exploded ? this.explodeTilt(id) : 0;
+      group.traverse(object => { if (object.userData.explodeOnly) object.visible = exploded; });
       // Keep a newly generated group in its current view without a misleading assembly flash.
       if (!group.userData.positionInitialized) { group.position.copy(group.userData.target); group.userData.positionInitialized = true; }
     }
@@ -373,7 +460,7 @@ export class GarmentViewer {
       this.camera.position.set(.82 * fit, .13 + .30 * fit, 1.20 * fit); this.controls.target.set(0, .13, 0);
     } else {
       const fit = Math.max(1, .65 / this.camera.aspect * Math.max(1, (this.params?.hip || 104) / 104));
-      this.camera.position.set(.78 * fit, .065 + .285 * fit, 1.42 * fit); this.controls.target.set(0, .065, 0);
+      this.camera.position.set(1.05 * fit, .065 + .285 * fit, 1.23 * fit); this.controls.target.set(0, .065, 0);
     }
     this.controls.update(); this.controls.saveState();
   }

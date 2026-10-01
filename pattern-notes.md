@@ -9,7 +9,7 @@
 ## 构造和可审计公式
 
 - 腰口净周长 = 输入腰口位置围度 × (1 − 纸样收紧比例)。臀横总宽亦按同一比例处理。
-- 前、后腰口与臀横净宽分别占总宽 48%、52%；这是公开的示例分配，非行业标准。
+- 原版前、后腰口与臀横净宽分别占总宽 48%、52%；这是公开的示例分配，非行业标准。
 - 每片侧缝是直线。横向差 `dx = (本片臀横宽 − 本片腰口宽) / 2`，竖直落差 `dy = √(侧缝长² − dx²)`，因此前后左右侧缝都严格等长。
 - 前片底边 = 裆片前端宽，对应 A；后片底边 = 裆片后端宽，对应 B；左右侧缝对应 C。
 - 腿弯与裆侧均为三次贝塞尔曲线，每段采样 96 等参数步，以采样折线累计弧长。
@@ -17,6 +17,16 @@
 - 单条腿口净周长 = 前片一侧腿弧 + 后片一侧腿弧 + 一片裆片一侧弧长。裆外与裆里重叠缝制，不能把裆侧长度加两次。
 - 每根松紧带裁长 = 开口净周长 × 相应松紧带比例 + 每根的接头额外用量。腿带共裁两根。`waistOpeningOverride/legOpeningOverride` 可用实测缝好后的开口净周长替换计算基准，但不会修改纸样几何。
 - 裁线由净样采样边向外作真实法向距离偏移，再求相邻偏移直线交点得到。接合边使用 `seamAllowance`，腰与腿边使用 `edgeAllowance`；不同预留宽度在近共线转角处以短直线衔接，避免延长交线产生尖刺。不是加粗描边或整体缩放。
+
+## C 拼缝前移与无损重分片
+
+`seamShift` 以 cm 表示两侧各从原正侧面沿腰口向前移动的长度；默认 3 仅作演示，范围 0—6，并接受进一步的几何校验。0 返回原侧线分片。
+
+在原前片内作平行于原 C 线的新切线，腰端向中心移动 `seamShift`，与原腿弧采样边求交。切下的左右窄翼各经保持长度与面积的刚性展开拼到后片。原 C 成为后片内部定位线，新 C 为前后片对应拼缝。因此总腰口、每腿净弧长、裆 A/B 与布片数量保持不变；新 C 净长可能与原侧线参考长不同。这里只改变分片位置，不改变原版轮廓。
+
+`dimensions.sideSeamLength` 为新 C 实际净长，`referenceSideSeam` 为原参考值，`transferredLegArc` 为每腿由前片转给后片的净弧长。腰口净边长用实际边长汇总，后片展开后的外框宽度不能代替腰口长度。
+
+分区模式按布片计算；后片包含绕到前侧的窄翼。若转移弧长为 t，前／后段新长分别为旧长−t、旧长+t；净带总长变化为 `t × (后比例 − 前比例) / 100`。均匀模式不变。既有三段实测值可能是旧拼缝位置，应重新量取。
 
 ## 整圈均匀与前／裆／后分区
 
@@ -32,11 +42,11 @@
 
 `dimensions.legSegments` 按前→裆→后排列，每段包含 `id,name,patternLength,basisLength,ratioPct,elasticLength,startMark,endMark`。`legElasticNet` 是单腿净带圈长，`legElasticBasis` 为本次实际采用的布边基准总长，`legElasticBasisSource` 为 `pattern`、`segments-measured` 或 `opening-measured`。
 
-定位须先接好一根松紧带，再从侧缝0点沿净带圈依次量前段、A点、裆段、B点、后段、回到侧缝。`startMark/endMark` 都不包含接头额外用量；每条腿各做一套相同的定位。
+定位须先接好一根松紧带，再从 C 拼缝0点沿净带圈依次量前段、A点、裆段、B点、后段、回到 C 拼缝。`startMark/endMark` 都不包含接头额外用量；每条腿各做一套相同的定位。
 
 ## 输出
 
-`pieces` 为前片、后片、裆外片、裆里片，共 4 块布。每片含 `points` 裁线、`seamPoints` 净样、`edgeRoles`、`edgeAllowances`、`bounds`、`width/height`、`annotations`、`seams`。`seams` 中每条缝含 `{points,length,label?}`；前后片含 `waist,sideLeft,sideRight,legLeft,legRight,gussetJoin`，裆片含 `frontJoin,backJoin,legLeft,legRight`。腿弧额外含 `curve:{type:'cubic-bezier',controlPoints:[p0,p1,p2,p3]}`，供检查拼接端点与切线。
+`pieces` 为前片、后片、裆外片、裆里片，共 4 块布。每片含 `points` 裁线、`seamPoints` 净样、`edgeRoles`、`edgeAllowances`、`bounds`、`width/height`、`annotations`、`seams`。`seams` 中每条缝含 `{points,length,label?}`；前后片含 `waist,sideLeft,sideRight,legLeft,legRight,gussetJoin`，裆片含 `frontJoin,backJoin,legLeft,legRight`。原腿弧含 `curve:{type:'cubic-bezier',controlPoints:[p0,p1,p2,p3]}`；移缝后的完整前后腿边按实际采样折线计算，`curve.sourceOnly:true` 与 `parameterRange` 明确原控制点只描述源曲线，不能拿它计算重分后的完整边长。
 
 `dimensions` 汇总腰臀宽、各片净长、侧缝长、腿口各弧长、松紧带计算基准、单根与合计裁长。此处保存完整计算精度；界面显示时再取小数，不应先四舍五入再求和。
 

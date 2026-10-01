@@ -11,7 +11,8 @@ test('four complete pieces share stitch lengths and generate exact elastic arith
   assert.equal(m.pieces.length,4);
   const [f,b,g,l]=m.pieces;
   close(f.seams.sideLeft.length,b.seams.sideLeft.length);
-  close(f.seams.sideRight.length,DEFAULTS.sideSeam);
+  close(f.seams.sideRight.length,m.dimensions.sideSeamLength);
+  close(m.dimensions.referenceSideSeam,DEFAULTS.sideSeam);
   close(f.seams.gussetJoin.length,g.seams.frontJoin.length);
   close(b.seams.gussetJoin.length,g.seams.backJoin.length);
   assert.deepEqual(g.seamPoints,l.seamPoints);
@@ -60,7 +61,8 @@ test('rise names do not secretly override supplied measurements', () => {
   assert.deepEqual(a.pieces,b.pieces);
   close(c.dimensions.frontLength-a.dimensions.frontLength,4);
   close(c.dimensions.backLength-a.dimensions.backLength,4);
-  close(c.pieces[0].seams.sideRight.length,13);
+  close(c.dimensions.referenceSideSeam,13);
+  close(c.pieces[0].seams.sideRight.length,c.dimensions.sideSeamLength);
   assert.notDeepEqual(a.pieces,c.pieces);
 });
 
@@ -106,8 +108,9 @@ test('FOE defaults reserve nothing at openings and allow 0.6 cm at joining seams
   for(const piece of m.pieces) {
     piece.edgeRoles.forEach((role,i)=>close(piece.edgeAllowances[i],['waist','leg'].includes(role)?0:.6));
   }
-  close(m.pieces[0].seams.sideLeft.length,17);
-  close(m.pieces[1].seams.sideLeft.length,17);
+  close(m.dimensions.referenceSideSeam,17);
+  close(m.pieces[0].seams.sideLeft.length,m.dimensions.sideSeamLength);
+  close(m.pieces[1].seams.sideLeft.length,m.dimensions.sideSeamLength);
   const s=renderPatternSVG(m);
   assert.match(s,/接头额外用量 1.2 cm/);
   assert.doesNotMatch(s,/接头重叠量/);
@@ -321,8 +324,8 @@ test('download includes actual regional numbers, final marks, method and transve
   close(m.dimensions.legElastic,58.1);
   assert.match(s,/前片腿弯 20 × 100% = 20 cm/);
   assert.match(s,/裆侧边 15 × 100% = 15 cm/);
-  assert.match(s,/后片腿弯 25 × 90% = 22.5 cm/);
-  assert.match(s,/A 20 → 裆侧 → B 35 → 后片 → 侧缝 57.5 cm/);
+  assert.match(s,/后片及前移翼腿弯 25 × 90% = 22.5 cm/);
+  assert.match(s,/A 20 → 裆侧 → B 35 → 后片及前移翼 → C 拼缝 57.5 cm/);
   assert.match(s,/裁长 58.1 cm × 2/);
   assert.match(s,/收口：内折松紧带；接头：搭接/);
   assert.equal((s.match(/data-stretch="horizontal"/g)||[]).length,4);
@@ -334,4 +337,141 @@ test('download includes actual regional numbers, final marks, method and transve
     assert.ok(x>=0 && x+estimated<width);
     assert.ok(y>0 && y+size<height-5);
   }
+});
+
+const netArea = points => Math.abs(points.reduce((sum,p,i)=>{
+  const next=points[(i+1)%points.length]; return sum+p[0]*next[1]-p[1]*next[0];
+},0))/2;
+const pointDistance=(a,b)=>Math.hypot(a[0]-b[0],a[1]-b[1]);
+
+test('zero shift restores original boundaries and exposes explicit zero viewer mapping',()=>{
+  const m=draft({seamShift:0}),[front,back]=m.pieces,d=m.dimensions;
+  assert.equal(m.valid,true);
+  assert.equal(DEFAULTS.seamShift,3);
+  close(d.sideSeamLength,9);
+  close(d.frontWaistWidth,84*.96*.48);
+  close(d.backWaistWidth,84*.96*.52);
+  assert.equal(front.seamPoints.length,196);
+  assert.equal(back.seamPoints.length,196);
+  assert.deepEqual(front.seams.sideRight.points,m.seamShift.front.originalRight);
+  assert.deepEqual(back.seams.sideRight.points,m.seamShift.back.originalRight);
+  assert.deepEqual(front.seams.sideRight.points,m.seamShift.front.shiftedRight);
+  for(const key of ['amount','frontLegT','frontLegFraction','frontWaistFraction','transferredLegArc']) close(m.seamShift[key],0);
+  assert.equal(back.transferredWings,undefined);
+});
+
+test('front-wing transfer conserves waist length, leg length and net area across sizes and shifts',()=>{
+  for(const params of [{},{waist:92,hip:112},{waist:92,hip:112,rise:'high',frontLength:26,backLength:29,sideSeam:17}]) {
+    const base=draft({...params,seamShift:0}),baseArea=netArea(base.pieces[0].seamPoints)+netArea(base.pieces[1].seamPoints);
+    for(const seamShift of [.5,1,3,6]) {
+      const m=draft({...params,seamShift});assert.equal(m.valid,true,m.errors.join('; '));
+      const d=m.dimensions,[front,back]=m.pieces;
+      close(d.waistOpening,base.dimensions.waistOpening);
+      close(front.seams.waist.length+back.seams.waist.length,base.dimensions.waistOpening);
+      close(d.frontWaistWidth,base.dimensions.frontWaistWidth-2*seamShift);
+      close(d.backWaistWidth,base.dimensions.backWaistWidth+2*seamShift);
+      close(d.legOpening,base.dimensions.legOpening);
+      close(d.legElastic,base.dimensions.legElastic);
+      close(netArea(front.seamPoints)+netArea(back.seamPoints),baseArea);
+      close(base.dimensions.frontLegArc-d.frontLegArc,d.transferredLegArc);
+      close(d.backLegArc-base.dimensions.backLegArc,d.transferredLegArc);
+      close(d.originalFrontHipWidth,base.dimensions.frontHipWidth);
+      close(d.originalBackHipWidth,base.dimensions.backHipWidth);
+      assert.equal(m.pieces.length,4);
+    }
+  }
+});
+
+test('transferred wing is a rigid reflection and new C edges correspond exactly',()=>{
+  for(const seamShift of [1,3,6]) {
+    const m=draft({seamShift}),s=m.seamShift,[front,back]=m.pieces;
+    const source=s.front.wingRight,target=s.back.wingRight;
+    assert.equal(source.length,target.length);
+    close(netArea(source),netArea(target));
+    for(let i=0;i<source.length;i++) {
+      close(pointDistance(source[i],source[0]),pointDistance(target[i],target[0]));
+      close(pointDistance(source[i],source.at(-1)),pointDistance(target[i],target.at(-1)));
+    }
+    for(const piece of [front,back]) {
+      close(piece.seams.sideRight.length,s.sideSeamLength);
+      close(piece.seams.sideLeft.length,s.sideSeamLength);
+      assert.equal(piece.edgeRoles.filter(role=>role==='side').length,2);
+    }
+    close(s.front.originalRight[0][0]-s.front.shiftedRight[0][0],seamShift);
+    const oldDirection=s.front.originalRight[1].map((v,i)=>v-s.front.originalRight[0][i]);
+    const newDirection=s.front.shiftedRight[1].map((v,i)=>v-s.front.shiftedRight[0][i]);
+    close(oldDirection[0]*newDirection[1]-oldDirection[1]*newDirection[0],0);
+    assert.ok(s.sideSeamLength>s.referenceSideSeam);
+  }
+});
+
+test('seam shift keeps left-right symmetry, gusset pieces and A/B joins unchanged',()=>{
+  const zero=draft({seamShift:0}),m=draft({seamShift:6});
+  assert.deepEqual(m.pieces.slice(2),zero.pieces.slice(2));
+  for(let i=0;i<2;i++) {
+    const piece=m.pieces[i];
+    assert.deepEqual(piece.seams.gussetJoin,zero.pieces[i].seams.gussetJoin);
+    assert.deepEqual(piece.seams.legRight.points.at(-1),zero.pieces[i].seams.legRight.points.at(-1));
+    for(const key of ['side','leg']) {
+      const left=piece.seams[key+'Left'].points,right=piece.seams[key+'Right'].points;
+      assert.equal(left.length,right.length);
+      right.forEach((p,k)=>{close(left[k][0],-p[0]);close(left[k][1],p[1]);});
+    }
+    close(piece.bounds.minX,-piece.bounds.maxX);
+  }
+});
+
+test('original C becomes an internal reference in the back without an added sewing edge',()=>{
+  const back=draft({seamShift:3}).pieces[1],side=back.references.sideRight.points;
+  const mid=[(side[0][0]+side[1][0])/2,(side[0][1]+side[1][1])/2];
+  const points=back.seamPoints;
+  let inside=false;
+  for(let i=0,j=points.length-1;i<points.length;j=i++) {
+    const a=points[i],b=points[j];
+    if((a[1]>mid[1])!==(b[1]>mid[1]) && mid[0]<(b[0]-a[0])*(mid[1]-a[1])/(b[1]-a[1])+a[0]) inside=!inside;
+    assert.ok(Math.abs(pointDistance(a,mid)+pointDistance(mid,b)-pointDistance(a,b))>1e-7);
+  }
+  assert.equal(inside,true);
+  assert.equal(back.edgeRoles.filter(role=>role==='side').length,2);
+});
+
+test('cloth-based segmented tension changes only by transferred arc times ratio difference',()=>{
+  for(const [frontElasticPct,backElasticPct] of [[100,95],[100,100],[90,100],[84,91]]) {
+    const params={legElasticMode:'segmented',frontElasticPct,backElasticPct,gussetElasticPct:98};
+    const a=draft({...params,seamShift:0}),b=draft({...params,seamShift:3});
+    const expected=b.dimensions.transferredLegArc*(backElasticPct-frontElasticPct)/100;
+    close(b.dimensions.legElastic-a.dimensions.legElastic,expected);
+    close(b.dimensions.legSegments.at(-1).endMark,b.dimensions.legElasticNet);
+    assert.match(b.dimensions.legSegments[2].name,/前移翼/);
+    assert.ok(b.warnings.some(w=>w.includes('不等同人体后臀')));
+  }
+});
+
+test('viewer mapping identifies the unchanged source curve and waist fractions',()=>{
+  const zero=draft({seamShift:0}),m=draft({seamShift:3}),s=m.seamShift;
+  assert.ok(s.frontLegT>0 && s.frontLegT<1);
+  close(s.frontLegFraction,s.transferredLegArc/zero.dimensions.frontLegArc);
+  close(s.frontWaistFraction,3/(zero.dimensions.frontWaistWidth/2));
+  const points=zero.pieces[0].seams.legRight.points,k=s.frontLegT*96,index=Math.floor(k),t=k-index;
+  const expected=points[index].map((v,axis)=>v+t*(points[index+1][axis]-v));
+  expected.forEach((v,i)=>close(v,s.front.shiftedRight[1][i]));
+});
+
+test('invalid or geometrically excessive shift rejects with a useful error',()=>{
+  for(const seamShift of [-.1,6.1,NaN,'',null,true]) assert.equal(draft({seamShift}).valid,false);
+  const m=draft({waist:45,hip:60,sideSeam:9,seamShift:6,gussetFront:8});
+  assert.equal(m.valid,false);
+  assert.ok(m.errors.some(error=>error.includes('前移量过大')));
+});
+
+test('SVG labels original reference and actual C length without false straight rear-waist width',()=>{
+  const m=draft({seamShift:3}),s=renderPatternSVG(m);
+  assert.equal((s.match(/data-reference="original-side"/g)||[]).length,4);
+  assert.equal((s.match(/data-seam="C"/g)||[]).length,4);
+  assert.equal((s.match(/data-transferred-wing="true"/g)||[]).length,2);
+  assert.match(s,/腰口净边长 47\.9 cm（沿折线）/);
+  assert.match(s,/C 拼缝 10\.6 cm/);
+  assert.match(s,/原侧线参考 9 cm/);
+  assert.match(s,/灰点线仅定位，不裁开、不加缝份/);
+  assert.doesNotMatch(s,/臀横净宽/);
 });
